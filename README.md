@@ -1,215 +1,219 @@
-# 🔁 Agente auto-corrector (Reflexion)
+> **Idioma / Language:** **English** · [Español](README.es.md)
 
-Un agente que **no se queda con su primera respuesta**. Genera un borrador, luego
-un **crítico** lo evalúa contra una rúbrica y devuelve un veredicto estructurado
-(puntaje + problemas concretos), y si hace falta el agente **reescribe** el
-borrador resolviendo esos problemas. El ciclo se repite hasta **aprobar** o agotar
-un presupuesto de iteraciones.
+# 🔁 Self-Correcting Agent (Reflexion)
 
-Es la técnica **Reflexion**: usar al propio modelo como su revisor para subir la
-calidad sin intervención humana. Funciona con **Ollama** (local o cloud — por
-defecto `minimax-m3:cloud`) o con **DeepSeek** (API en la nube) — se elige por una
-variable de entorno.
+An agent that **doesn't settle for its first answer**. It generates a draft, then
+a **critic** evaluates it against a rubric and returns a structured verdict (score
++ concrete issues), and if needed the agent **rewrites** the draft fixing those
+issues. The cycle repeats until it's **approved** or a budget of iterations runs
+out.
 
-Tiene una **interfaz web moderna** (React + shadcn/ui + Tailwind sobre un backend
-FastAPI, que transmite cada iteración **en vivo** por Server-Sent Events) y
-también **CLI** y una alternativa **Streamlit** sin npm.
+It's the **Reflexion** technique: using the model itself as its reviewer to raise
+quality without human intervention. It works with **Ollama** (local or cloud — by
+default `minimax-m3:cloud`) or with **DeepSeek** (cloud API) — chosen by an
+environment variable.
+
+It has a **modern web interface** (React + shadcn/ui + Tailwind over a FastAPI
+backend, which streams each iteration **live** via Server-Sent Events) and also a
+**CLI** and a **Streamlit** alternative without npm.
 
 ```
-?  Explica qué es la inyección SQL y cómo prevenirla.
+?  Explain what SQL injection is and how to prevent it.
 
-  ✍️  Borrador (iter. 1)
-  La inyección SQL es cuando un atacante mete código SQL en un input…
+  ✍️  Draft (iter. 1)
+  SQL injection is when an attacker inserts SQL code into an input…
 
-  🔍 Crítica (iter. 1)   ↻ a revisar   puntaje: 60/100
-     • Falta un ejemplo de código concreto.
-     • No menciona consultas parametrizadas como defensa principal.
+  🔍 Critique (iter. 1)   ↻ needs review   score: 60/100
+     • Missing a concrete code example.
+     • Doesn't mention parameterized queries as the main defense.
 
-  ↻ Reescribiendo para resolver 2 problema(s).
+  ↻ Rewriting to fix 2 issue(s).
 
-  ✍️  Reescritura (iter. 2)
-  La **inyección SQL** ocurre cuando datos no confiables se concatenan…
+  ✍️  Rewrite (iter. 2)
+  **SQL injection** happens when untrusted data is concatenated…
   ```sql
-  -- Vulnerable:  "SELECT * FROM users WHERE name = '" + nombre + "'"
-  -- Seguro (parametrizado):
-  cursor.execute("SELECT * FROM users WHERE name = ?", (nombre,))
+  -- Vulnerable:  "SELECT * FROM users WHERE name = '" + name + "'"
+  -- Safe (parameterized):
+  cursor.execute("SELECT * FROM users WHERE name = ?", (name,))
   ```
 
-  🔍 Crítica (iter. 2)   ✓ aprobado   puntaje: 92/100
+  🔍 Critique (iter. 2)   ✓ approved   score: 92/100
 
-  Respuesta final (aprobada, 2 iteraciones)
+  Final answer (approved, 2 iterations)
 ```
 
-## El problema
+## The problem
 
-La primera respuesta de un LLM suele ser "suficiente", pero no la mejor: omite
-partes de la pregunta, le falta un ejemplo, mezcla cosas o se va por las ramas.
-Pedirle "esfuérzate más" de entrada no alcanza, porque el modelo no sabe **qué**
-está mal con lo que todavía no escribió.
+An LLM's first answer is usually "good enough", but not the best: it omits parts
+of the question, lacks an example, mixes things up or rambles. Telling it "try
+harder" up front isn't enough, because the model doesn't know **what's** wrong
+with what it hasn't written yet.
 
-## La solución
+## The solution
 
-Separar **escribir** de **evaluar**, y cerrar el ciclo:
+Separate **writing** from **evaluating**, and close the loop:
 
-1. **Generar.** El agente produce un primer borrador para la petición.
-2. **Criticar.** Un segundo rol —el crítico, con su propio prompt y temperatura 0—
-   juzga el borrador contra una **rúbrica** (correctitud, completitud, claridad,
-   formato) y devuelve **JSON**: `approved`, `score` y una lista de `issues`
-   accionables.
-3. **Reescribir.** Si no está aprobado, el agente reescribe el borrador con los
-   problemas como contexto, y vuelve al paso 2.
-4. **Cortar.** Termina al aprobar, o al llegar al tope de iteraciones; en ese caso
-   devuelve el **mejor intento** (el de mayor puntaje), no el último sin más.
+1. **Generate.** The agent produces a first draft for the request.
+2. **Critique.** A second role —the critic, with its own prompt and temperature 0—
+   judges the draft against a **rubric** (correctness, completeness, clarity,
+   format) and returns **JSON**: `approved`, `score` and a list of actionable
+   `issues`.
+3. **Rewrite.** If not approved, the agent rewrites the draft with the issues as
+   context, and goes back to step 2.
+4. **Stop.** It ends on approval, or when reaching the iteration cap; in that case
+   it returns the **best attempt** (the highest-scoring one), not just the last.
 
-El truco es que **criticar es más fácil que generar**: el modelo detecta fallos en
-un texto concreto que tiene delante mucho mejor que si intentara escribir perfecto
-de una. Cada reescritura ataca problemas específicos, no un "hazlo mejor" difuso.
+The trick is that **criticizing is easier than generating**: the model detects
+flaws in a concrete text in front of it far better than if it tried to write
+perfectly in one shot. Each rewrite attacks specific issues, not a vague "make it
+better".
 
-## Lo que lo hace robusto
+## What makes it robust
 
-- 🎯 **Veredicto estructurado**: el crítico responde en JSON (modo JSON nativo del
-  backend). Se parsea de forma **defensiva**: si el JSON viene en un bloque
-  ```` ```json ```` se limpia, y si es ilegible se asume "no aprobado" para seguir
-  iterando en vez de romper.
-- 🧮 **Coherencia forzada**: si el crítico marca problemas pero dice "aprobado",
-  se corrige a no aprobado (los problemas mandan).
-- 💰 **Presupuesto de iteraciones**: tope configurable (`max_iters`) para acotar el
-  costo y evitar loops; el costo es la preocupación #1 en producción.
-- 🏆 **Mejor intento**: si se agota el presupuesto, se devuelve el borrador con
-  mayor puntaje, no necesariamente el último.
-- 🔌 **Dos backends**: DeepSeek u Ollama, intercambiables sin tocar el agente.
+- 🎯 **Structured verdict**: the critic answers in JSON (the backend's native JSON
+  mode). It's parsed **defensively**: if the JSON comes in a ```` ```json ````
+  block it's cleaned, and if it's unreadable it's assumed "not approved" to keep
+  iterating instead of breaking.
+- 🧮 **Forced consistency**: if the critic flags issues but says "approved", it's
+  corrected to not approved (the issues win).
+- 💰 **Iteration budget**: a configurable cap (`max_iters`) to bound cost and avoid
+  loops; cost is the #1 concern in production.
+- 🏆 **Best attempt**: if the budget runs out, the highest-scoring draft is
+  returned, not necessarily the last.
+- 🔌 **Two backends**: DeepSeek or Ollama, interchangeable without touching the
+  agent.
 
-## Arquitectura
+## Architecture
 
 ```
-server.py             Backend HTTP (FastAPI): expone el agente y transmite cada
-                      iteración EN VIVO por SSE (/api/stream).
-app.py                Interfaz web alternativa (Streamlit), sin npm.
-web/                  Frontend React + Vite + shadcn/ui + Tailwind.
-├── src/App.tsx        UI principal: input, línea de tiempo de iteraciones, respuesta.
-├── src/components/    IterationCard (borrador + crítica + anillo de puntaje) y shadcn/ui.
-└── src/lib/agent.ts   Cliente SSE y tipos del stream.
+server.py             HTTP backend (FastAPI): exposes the agent and streams each
+                      iteration LIVE via SSE (/api/stream).
+app.py                Alternative web interface (Streamlit), no npm.
+web/                  React + Vite + shadcn/ui + Tailwind frontend.
+├── src/App.tsx        Main UI: input, iteration timeline, answer.
+├── src/components/    IterationCard (draft + critique + score ring) and shadcn/ui.
+└── src/lib/agent.ts   SSE client and stream types.
 src/
-├── llm.py            Backends del LLM: DeepSeek (HTTP) y Ollama, intercambiables.
-├── prompts.py        Los prompts de los tres roles (generador, crítico, reescritor).
-├── critic.py         Evalúa un borrador → Verdict (JSON parseado de forma robusta).
-├── agent.py          El loop Reflexion: generar → criticar → reescribir, con eventos.
-└── main.py           CLI (rich) con la traza viva de cada iteración.
-tests/                Tests con un LLM falso (sin red real ni llamadas a la API).
+├── llm.py            LLM backends: DeepSeek (HTTP) and Ollama, interchangeable.
+├── prompts.py        The prompts of the three roles (generator, critic, rewriter).
+├── critic.py         Evaluates a draft → Verdict (robustly parsed JSON).
+├── agent.py          The Reflexion loop: generate → critique → rewrite, with events.
+└── main.py           CLI (rich) with a live trace of each iteration.
+tests/                Tests with a fake LLM (no real network, no API calls).
 ```
 
-El frontend (React) habla con el backend (FastAPI), que envuelve el agente
-(Python). El progreso viaja del agente al navegador en tiempo real por
+The frontend (React) talks to the backend (FastAPI), which wraps the agent
+(Python). The progress travels from the agent to the browser in real time via
 **Server-Sent Events**:
 
 ```
-  navegador (React/shadcn) ──HTTP──► FastAPI (server.py) ──► SelfCorrectingAgent (src/)
+  browser (React/shadcn) ──HTTP──► FastAPI (server.py) ──► SelfCorrectingAgent (src/)
         ▲                                                          │
-        └────────── SSE: borrador, crítica, reescritura ◄──────────┘
+        └────────── SSE: draft, critique, rewrite ◄───────────────┘
 ```
 
-El **loop** que coordina `agent.py`:
+The **loop** coordinated by `agent.py`:
 
 ```
-            petición
+            request
                │
                ▼
-        ✍️  Generar borrador
+        ✍️  Generate draft
                │
                ▼
-        🔍 Criticar ──► Verdict { approved, score, issues }
+        🔍 Critique ──► Verdict { approved, score, issues }
                │
-        ¿aprobado? ── sí ──► ✅ respuesta final
+        approved? ── yes ──► ✅ final answer
                │ no
                ▼
-        ¿queda presupuesto? ── no ──► 🏆 mejor intento
-               │ sí
+        budget left? ── no ──► 🏆 best attempt
+               │ yes
                ▼
-        ✍️  Reescribir (con los issues) ──┐
-               ▲                          │
-               └──────────────────────────┘
+        ✍️  Rewrite (with the issues) ──┐
+               ▲                        │
+               └────────────────────────┘
 ```
 
-## Requisitos
+## Requirements
 
 - **Python 3.10+**
-- **Node 18+** y **npm** (para la interfaz web React; la versión Streamlit no lo necesita)
-- Un backend de LLM, **uno** de estos dos:
-  - **Ollama** (recomendado) → https://ollama.com. Para `minimax-m3:cloud` y otros
-    modelos `*:cloud`, ejecuta `ollama signin`; para modelos locales, `ollama serve`.
-  - **DeepSeek** → API key en https://platform.deepseek.com
+- **Node 18+** and **npm** (for the React web interface; the Streamlit version doesn't need it)
+- An LLM backend, **one** of these two:
+  - **Ollama** (recommended) → https://ollama.com. For `minimax-m3:cloud` and other
+    `*:cloud` models, run `ollama signin`; for local models, `ollama serve`.
+  - **DeepSeek** → API key at https://platform.deepseek.com
 
-## Instalación
+## Installation
 
 ```bash
-# 1. Clonar el repositorio
+# 1. Clone the repository
 git clone https://github.com/mauriciodejuantrabajo/self-correcting-agent.git
 cd self-correcting-agent
 
-# 2. (Opcional) entorno virtual
+# 2. (Optional) virtual environment
 python -m venv .venv
 # Windows:  .venv\Scripts\activate
 # Linux/Mac: source .venv/bin/activate
 
-# 3. Instalar dependencias
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Configurar el backend (ver siguiente sección)
+# 4. Configure the backend (see next section)
 ```
 
-## Configuración
+## Configuration
 
 ```bash
-cp .env.example .env       # en Windows: copy .env.example .env
+cp .env.example .env       # on Windows: copy .env.example .env
 ```
 
-Edita `.env` y elige el backend con `LLM_BACKEND`.
+Edit `.env` and choose the backend with `LLM_BACKEND`.
 
-**Opción A — Ollama (recomendada, por defecto):**
+**Option A — Ollama (recommended, default):**
 
 ```env
 LLM_BACKEND=ollama
 OLLAMA_MODEL=minimax-m3:cloud
-# OLLAMA_HOST=http://localhost:11434   # opcional
+# OLLAMA_HOST=http://localhost:11434   # optional
 ```
 
-Para los modelos cloud (`minimax-m3:cloud` y otros `*:cloud`) necesitas una cuenta
-de Ollama: ejecuta `ollama signin` una vez. Para un modelo local, primero
-`ollama pull llama3.1` (o el que prefieras) y pon `OLLAMA_MODEL=llama3.1`.
+For cloud models (`minimax-m3:cloud` and other `*:cloud`) you need an Ollama
+account: run `ollama signin` once. For a local model, first
+`ollama pull llama3.1` (or whichever you prefer) and set `OLLAMA_MODEL=llama3.1`.
 
-**Opción B — DeepSeek (API en la nube):**
+**Option B — DeepSeek (cloud API):**
 
 ```env
 LLM_BACKEND=deepseek
-DEEPSEEK_API_KEY=sk-tu-key-real-aca
+DEEPSEEK_API_KEY=sk-your-real-key-here
 DEEPSEEK_MODEL=deepseek-v4-flash
 ```
 
-> 🔒 **`.env` está en `.gitignore` y nunca se sube.** El archivo versionado es
-> `.env.example`, que solo trae placeholders.
+> 🔒 **`.env` is in `.gitignore` and is never committed.** The versioned file is
+> `.env.example`, which only carries placeholders.
 
-## Uso
+## Usage
 
-### Interfaz web (React + shadcn — recomendada)
+### Web interface (React + shadcn — recommended)
 
-Necesitas **dos procesos**: el backend (FastAPI) y el frontend (Vite).
+You need **two processes**: the backend (FastAPI) and the frontend (Vite).
 
 ```bash
-# Terminal 1 — backend (en la raíz del repo)
+# Terminal 1 — backend (at the repo root)
 uvicorn server:app --reload --port 8000
 
 # Terminal 2 — frontend
 cd web
-npm install        # solo la primera vez
+npm install        # first time only
 npm run dev
 ```
 
-Abre `http://localhost:5173`. Vite redirige `/api` al backend (puerto 8000). Escribe
-tu petición y verás, en vivo, la **línea de tiempo** de iteraciones: cada borrador,
-su **crítica** con el puntaje (anillo de color) y los problemas, hasta la respuesta
-final aprobada. Puedes ajustar el **máximo de iteraciones** (2–5).
+Open `http://localhost:5173`. Vite proxies `/api` to the backend (port 8000). Type
+your request and you'll see, live, the **timeline** of iterations: each draft, its
+**critique** with the score (color ring) and the issues, down to the final
+approved answer. You can adjust the **maximum iterations** (2–5).
 
-### Interfaz web alternativa (Streamlit, sin npm)
+### Alternative web interface (Streamlit, no npm)
 
 ```bash
 streamlit run app.py
@@ -218,10 +222,10 @@ streamlit run app.py
 ### CLI
 
 ```bash
-python -m src.main "Explica qué es la inyección SQL y cómo prevenirla."
-python -m src.main                                  # modo interactivo
-python -m src.main "tu petición" -n 4               # hasta 4 iteraciones
-python -m src.main "tu petición" -o respuesta.md    # guarda la respuesta final
+python -m src.main "Explain what SQL injection is and how to prevent it."
+python -m src.main                                  # interactive mode
+python -m src.main "your request" -n 4              # up to 4 iterations
+python -m src.main "your request" -o answer.md      # saves the final answer
 ```
 
 ## Tests
@@ -230,14 +234,14 @@ python -m src.main "tu petición" -o respuesta.md    # guarda la respuesta final
 pytest
 ```
 
-Los tests reemplazan el LLM por uno falso que devuelve borradores y veredictos
-predefinidos, modelando distintos escenarios. Cubren: el **parseo robusto** del
-veredicto del crítico (JSON limpio, con *code fence*, inválido, coherencia
-puntaje/aprobado), el **loop completo** (aprueba a la primera, reescribe y aprueba,
-agota iteraciones y devuelve el mejor intento), el **orden de los eventos** que
-alimentan la UI, y el **selector de backend** (DeepSeek/Ollama). **No se hace
-ninguna llamada de red real**, así el CI es reproducible y no consume cuota.
+The tests replace the LLM with a fake one that returns predefined drafts and
+verdicts, modeling different scenarios. They cover: the **robust parsing** of the
+critic's verdict (clean JSON, with a *code fence*, invalid, score/approved
+consistency), the **full loop** (approves on the first try, rewrites and approves,
+exhausts iterations and returns the best attempt), the **order of the events**
+that feed the UI, and the **backend selector** (DeepSeek/Ollama). **No real
+network call is made**, so the CI is reproducible and doesn't consume quota.
 
-## Licencia
+## License
 
 [MIT](LICENSE) © Mauricio De Juan
